@@ -81,6 +81,8 @@ type PairingPassThroughOptions = Omit<
 >;
 
 export type RequestEphemeralSessionWithPairingUiOptions = PairingPassThroughOptions & {
+  /** Reports waiting, approval, and approved dialog progress without pairing material. */
+  onStatusChange?: (message: string) => void;
   createDialog?: (options: PairingDialogOptions) => PairingDialog;
   dialog?: Omit<PairingDialogOptions, "onCancel">;
 };
@@ -411,7 +413,7 @@ export async function requestEphemeralSessionWithPairingUi(
 
   const copy = { ...defaultPairingDialogCopy, ...options.dialog?.copy };
   const cancelController = new AbortController();
-  const { createDialog: createDialogOption, dialog: dialogOptions, ...requestOptions } = options;
+  const { createDialog: createDialogOption, dialog: dialogOptions, onStatusChange, ...requestOptions } = options;
   const createDialog = createDialogOption ?? createPairingDialog;
   const dialog = createDialog({
     ...dialogOptions,
@@ -427,12 +429,15 @@ export async function requestEphemeralSessionWithPairingUi(
       onPairingMaterial: (material) => {
         dialog.show(material);
         dialog.setStatus(copy.waitingStatus);
+        onStatusChange?.(copy.waitingStatus);
       },
       onPeerJoined: () => {
         dialog.setStatus(copy.approveStatus);
+        onStatusChange?.(copy.approveStatus);
       }
     }, internal);
     dialog.setStatus(copy.approvedStatus);
+    onStatusChange?.(copy.approvedStatus);
     dialog.close();
     return session;
   } catch (error) {
@@ -518,6 +523,7 @@ async function displayFromButton(
     }
     const session = await requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
+      onStatusChange: (message) => { setStatus(options, status, message); },
       ...(options.appLinkBaseUrl === undefined ? {} : { appLinkBaseUrl: options.appLinkBaseUrl }),
       browserInfo: options.browserInfo ?? defaultButtonBrowserInfo(ownerDocument),
       ...(options.storage === undefined ? {} : { storage: options.storage }),

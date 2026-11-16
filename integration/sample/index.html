@@ -75,6 +75,7 @@
             Check device status
           </button>
           <p id="device-status" class="mt-2 text-sm text-neutral-300"></p>
+          <p id="status-updated-at" class="mt-2 text-xs text-neutral-400">Status refreshes every 5 seconds while this page is visible.</p>
         </div>
       </aside>
     </main>
@@ -82,11 +83,12 @@
     <script type="module">
       import {
         getDeviceStatus,
-        hasStoredEphemeralBrowserSession,
         mountDisplayOnArtComputerButton,
         readStoredEphemeralBrowserSession,
         unpairArtComputer
       } from "@feralfile/display";
+
+      import { createStatusMonitor } from "./status.ts";
 
       const brokerUrlInput = mustElement("broker-url");
       const appLinkBaseUrlInput = mustElement("app-link-base-url");
@@ -109,12 +111,22 @@
         message.textContent = value;
       }
 
+      const updatedAt = mustElement("status-updated-at");
+      const statusMonitor = createStatusMonitor({
+        readSession: () => readStoredEphemeralBrowserSession(window.location.origin),
+        query: (session) => getDeviceStatus({ session, timeoutMs: 10000 }),
+        visible: () => document.visibilityState === "visible",
+        render: (view) => {
+          sessionStatus.textContent = view.pairing;
+          deviceStatus.textContent = view.device;
+          updatedAt.textContent = view.checkedAt === undefined
+            ? "No current device status. Refreshes every 5 seconds while visible."
+            : `Updated ${new Date(view.checkedAt).toLocaleTimeString()} · Refreshes every 5 seconds`;
+        }
+      });
+
       function updateSessionStatus() {
-        hasStoredEphemeralBrowserSession(window.location.origin).then((paired) => {
-          sessionStatus.textContent = paired ? "Paired" : "Not paired";
-        }, () => {
-          sessionStatus.textContent = "Storage unavailable";
-        });
+        void statusMonitor.refresh();
       }
 
       function dp1Payload() {
@@ -164,28 +176,16 @@
 
       mountDisplayButton();
 
-      checkStatusButton.addEventListener("click", async () => {
-        checkStatusButton.disabled = true;
-        forgetButton.disabled = true;
-        deviceStatus.textContent = "Checking…";
-        try {
-          const session = await readStoredEphemeralBrowserSession(window.location.origin);
-          if (session?.kind !== "displayGrant") {
-            deviceStatus.textContent = "Pair with a relay v2 Art Computer first.";
-            return;
-          }
-          const status = await getDeviceStatus({ session });
-          deviceStatus.textContent = `Screen rotation: ${status.screenRotation}`;
-        } catch (error) {
-          deviceStatus.textContent = error instanceof Error ? error.message : "Could not read device status.";
-        } finally {
-          checkStatusButton.disabled = false;
-          forgetButton.disabled = false;
-          updateSessionStatus();
-        }
-      });
+      checkStatusButton.addEventListener("click", updateSessionStatus);
+      window.setInterval(updateSessionStatus, 5000);
+      document.addEventListener("visibilitychange", updateSessionStatus);
+      window.addEventListener("pagehide", () => statusMonitor.pause());
+      window.addEventListener("pageshow", () => statusMonitor.resume());
 
       forgetButton.addEventListener("click", () => {
+        statusMonitor.pause();
+        sessionStatus.textContent = "Unpairing…";
+        updatedAt.textContent = "";
         checkStatusButton.disabled = true;
         deviceStatus.textContent = "";
         forgetButton.disabled = true;
@@ -197,7 +197,7 @@
         }).finally(() => {
           forgetButton.disabled = false;
           checkStatusButton.disabled = false;
-          updateSessionStatus();
+          statusMonitor.resume();
         });
       });
 
