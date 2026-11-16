@@ -206,3 +206,11 @@ that refuses the query raises `device_unsupported`.
 - A grant can cast `displayPlaylist` in the Play shape, read screen rotation with `getDeviceStatus` over relay v2, and revoke itself with `revokeController`.
 - Connect to relay v2 per cast and close at once; never hold an idle socket.
 - Keep API names requester-oriented rather than tied to a specific website.
+
+The wrapped button's `onStatusChange` callback also reports the pairing dialog's
+waiting, approval, and approved stages (including customized dialog copy), so a
+host page can keep its own status panel in sync. These callbacks contain UI
+text, never pairing credentials. Use `getDeviceStatus({ session })` for a fresh,
+read-only device query after pairing; the sample demonstrates visible-page
+polling and displays the response time. Each query opens and closes its own
+relay connection and never starts pairing.

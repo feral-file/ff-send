@@ -31,6 +31,19 @@ async function seeded(): Promise<{ ctl: string; sig: Jwk; grants: Record<string,
 }
 
 describe("getDeviceStatus over relay v2", () => {
+  it("reads a changed device value with fresh envelopes and closes each connection", async () => {
+    const { grants } = await seeded();
+    let screenRotation = "landscape";
+    const relay = deviceOnRelay(grants, () => ({ ok: true, res: { screenRotation } }));
+    await expect(getDeviceStatus({ session, socketFactory: relay.socketFactory })).resolves.toEqual({ screenRotation: "landscape" });
+    screenRotation = "portrait";
+    await expect(getDeviceStatus({ session, socketFactory: relay.socketFactory })).resolves.toEqual({ screenRotation: "portrait" });
+    expect(relay.ff1.seen.map((claims) => claims["cmd"])).toEqual(["getDeviceStatus", "getDeviceStatus"]);
+    expect(relay.ff1.seen.map((claims) => claims["ctr"])).toEqual([1, 2]);
+    expect(relay.ff1.seen[0]?.["rid"]).not.toBe(relay.ff1.seen[1]?.["rid"]);
+    expect(relay.sockets.every((socket) => socket.closed)).toBe(true);
+  });
+
   it("returns only the rotation from the verified FF1 reply", async () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants, () => ({ ok: true, res: { screenRotation: "portrait", connectedWifi: "private" } }));

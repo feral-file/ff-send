@@ -696,6 +696,9 @@ describe("mountDisplayOnArtComputerButton", () => {
     expect(await hasStoredEphemeralBrowserSession(testOrigin)).toBe(true);
     expect(relay.ff1.seen[0]).toMatchObject({ ctl: broker.issued[0]?.ctl, cmd: "displayPlaylist" });
     expect(statuses).toContain("Waiting for your Art Computer.");
+    expect(statuses).toContain(defaultPairingDialogCopy.waitingStatus);
+    expect(statuses).toContain(defaultPairingDialogCopy.approveStatus);
+    expect(statuses).toContain(defaultPairingDialogCopy.approvedStatus);
     expect(statuses.at(-1)).toBe("Playlist sent to Art Computer.");
   });
 

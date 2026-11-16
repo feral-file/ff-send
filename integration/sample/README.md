@@ -23,10 +23,21 @@ Once the Art Computer joins, the page sends requester metadata and its fresh dis
 
 If a stored grant already exists, the page skips pairing and sends the DP1 payload directly. **Forget** calls `unpairArtComputer()`: a best-effort self-revoke on the Art Computer, then the grant is deleted.
 
-After approval, click **Check device status** to see the current screen
-rotation. Rotate the screen from the Feral File app and click **Check device
-status** again to verify that the browser gets the updated value. This query
-requires FF OS with browser status support.
+After approval, the example automatically reads the paired device's screen
+rotation every five seconds while the page is visible. It shows the device ID
+and the time of the last successful response. **Check device status** requests
+an immediate refresh. Rotate the screen from the Feral File app to see the
+value change without clicking or re-pairing. A failed query replaces the old
+rotation with an error; a stored grant alone is not evidence the device is
+online. This requires FF OS with browser status support.
+
+The status panel also follows the library's pairing progress: waiting for the
+Art Computer, awaiting approval, approved, and playlist delivery. These events
+come from the actual pairing flow. Device polling uses only a stored display
+grant through `getDeviceStatus`; it never starts a pairing session. The
+owner-only `getMintPairingSession` command is deliberately not used by websites.
+Polling skips hidden pages, does not overlap requests, and discards replies
+from before **Forget** or a page lifecycle change.
 
 ## Delivered Grant Payload
 
