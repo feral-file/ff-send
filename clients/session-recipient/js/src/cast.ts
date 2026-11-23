@@ -4,6 +4,7 @@ import { RelayClient, RelayConnectError, RelayUndeliveredError, type SocketFacto
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, reserveCounter, type StoredDisplayGrant } from "./grantStore.js";
 import { readStoredRelayerSession, removeStoredRelayerSession } from "./sessionStore.js";
+import { watchPageHidden, whenPageVisible } from "./visibility.js";
 
 export type Dp1Playlist = Record<string, unknown>;
 
@@ -166,6 +167,18 @@ async function sendCommand(
   }
 }
 
+/**
+ * A `display_failed` in which no verified reply came back: the relay refused
+ * the connection, no Art Computer was on the channel, or the request went
+ * unanswered. Unlike a refusal the Art Computer signed, it says nothing about
+ * what the device did, so it is the one failure a suspended page may retry.
+ */
+class UnansweredError extends DisplayError {
+  constructor(message: string) {
+    super(message, "display_failed");
+  }
+}
+
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -191,7 +204,27 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
     return castWithRelayerSession(options, session);
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
-  const result = await runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory);
+  const send = (): Promise<unknown> =>
+    runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory);
+  // Pairing sends the visitor to the Feral File app, and a phone suspends the
+  // hidden tab within seconds: a request begun there can be frozen between
+  // chunks until its deadline has passed. An unanswered request whose page
+  // was hidden on the way is sent once more when the visitor is back, sealed
+  // fresh under a new counter. If the first copy did arrive, the Art Computer
+  // starts the same playlist again, which is what the visitor asked for.
+  const hiddenWatch = watchPageHidden();
+  let result: unknown;
+  try {
+    result = await send();
+  } catch (error) {
+    if (!(error instanceof UnansweredError) || !hiddenWatch.wasHidden()) {
+      throw error;
+    }
+    await whenPageVisible();
+    result = await send();
+  } finally {
+    hiddenWatch.stop();
+  }
   if (resOk(result) === false) {
     throw new DisplayError("FF1 rejected display request", "display_rejected");
   }
@@ -256,12 +289,12 @@ async function runDisplayGrantCommand(
       // The relay refused or dropped the connection before hello. Browsers
       // see no status, and the usual cause is the relay's per-address cap
       // (429 capacity / rate limited) when many tabs cast at once.
-      throw new DisplayError(tooManyCastsMessage, "display_failed");
+      throw new UnansweredError(tooManyCastsMessage);
     }
     if (outcome.error instanceof RelayUndeliveredError) {
-      throw new DisplayError("the FF1 is offline", "display_failed");
+      throw new UnansweredError("the FF1 is offline");
     }
-    throw new DisplayError(`${requestName} failed: ${outcome.error.message}`, "display_failed");
+    throw new UnansweredError(`${requestName} failed: ${outcome.error.message}`);
   }
   const { claims } = outcome;
   if (claims.ok) {

@@ -69,6 +69,7 @@ class FakeElement {
   public disabled = false;
   public hidden = false;
   public focused = false;
+  public readonly style: Record<string, string> = {};
   public readonly children: FakeElement[] = [];
   public readonly attributes = new Map<string, string>();
   public readonly tagName: string;
@@ -320,6 +321,12 @@ describe("layout detection", () => {
 });
 
 describe("createPairingDialog", () => {
+  it("stays tappable on a host page whose open modal turned pointer events off for the body", () => {
+    const { fake } = openDialog(null);
+    const overlay = required(fake.body.children.find((child) => child.className.includes("ff-ac-pairing-overlay")), "overlay");
+    expect(overlay.style["pointerEvents"]).toBe("auto");
+  });
+
   it("on a phone offers the app link as a button and the code below it, with no QR", () => {
     const { fake } = openDialog(phoneView());
     const panel = required(fake.body.find("ff-ac-pairing-panel"), "panel");

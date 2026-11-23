@@ -23,6 +23,7 @@ import {
 } from "./grantStore.js";
 import { algorithm, buildAppLink, defaultAppLinkBaseUrl, type PairingMaterial } from "./pairingPayload.js";
 import { readStoredRelayerSession, removeStoredRelayerSession, storeRelayerSession, type StoredRelayerSession } from "./sessionStore.js";
+import { onPageVisible, pageHidden, watchPageHidden } from "./visibility.js";
 
 export { ephemeralBrowserSessionStorageKey } from "./sessionStore.js";
 
@@ -503,6 +504,11 @@ function parseRelayerSession(value: Record<string, unknown>): RelayerSessionResu
   return { kind: "relayerSession", token, sessionId, expiresAt, persistent, relayerBaseUrl: optionalString(session, "relayerBaseUrl") };
 }
 
+/**
+ * Waits between polls. The wait also ends when the page turns visible: a
+ * visitor coming back from the Feral File app should not sit out the rest of
+ * an interval that began before the tab was suspended.
+ */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted === true) {
@@ -512,10 +518,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const finish = (): void => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", finish);
+      stopWatching();
       resolve();
     };
     const timer = setTimeout(finish, ms);
     signal?.addEventListener("abort", finish, { once: true });
+    const stopWatching = onPageVisible(finish);
   });
 }
 
@@ -931,6 +939,7 @@ async function completeMint(input: {
     while (Date.now() <= deadline) {
       throwIfAborted(context.signal);
       let poll: PollMessagesResponse;
+      const hiddenWatch = watchPageHidden();
       try {
         poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: approvalController.signal });
       } catch (error) {
@@ -939,6 +948,12 @@ async function completeMint(input: {
           throw timedOut();
         }
         if (error instanceof TypeError) {
+          // A poll in flight when the tab was suspended fails as the page
+          // wakes. That is the visitor returning from the app, usually with
+          // the answer already waiting: ask again now, not an interval later.
+          if (hiddenWatch.wasHidden() && !pageHidden()) {
+            continue;
+          }
           await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, approvalController.signal);
           continue;
         }
@@ -946,6 +961,8 @@ async function completeMint(input: {
           throw timedOut();
         }
         throw error;
+      } finally {
+        hiddenWatch.stop();
       }
       for (const message of poll.messages) {
         afterSeq = Math.max(afterSeq, message.seq);

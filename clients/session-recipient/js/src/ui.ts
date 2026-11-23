@@ -279,6 +279,11 @@ export function createPairingDialog(options: PairingDialogOptions): PairingDialo
   const overlay = ownerDocument.createElement("div");
   overlay.className = className("ff-ac-pairing-overlay", options.classNames?.overlay);
   overlay.setAttribute("role", "presentation");
+  // A host page with a modal open (a Radix or similar dialog) sets
+  // `pointer-events: none` on <body>, and the overlay, appended to <body>,
+  // would inherit it: nothing in the dialog could be tapped. Set inline so it
+  // holds under a host's own overlay class too.
+  overlay.style.pointerEvents = "auto";
 
   const panel = ownerDocument.createElement("section");
   panel.className = className("ff-ac-pairing-panel", options.classNames?.panel);

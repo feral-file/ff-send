@@ -7,6 +7,7 @@ import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantS
 import type { Jwk } from "./control-device.js";
 import { captureError, requestUrl } from "./fakeBroker.js";
 import { fakeRelay, type FakeSocket } from "./fakeRelay.js";
+import { FakeVisibility } from "./fakeVisibility.js";
 import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
 
 const testOrigin = "https://nft.example";
@@ -171,6 +172,71 @@ describe("displayDp1Playlist over relay v2", () => {
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 300 }));
     expect((error as DisplayError).code).toBe("display_failed");
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
+  });
+
+  it("sends once more when the visitor is back, after a request went unanswered while the page was hidden", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const { grants } = await seeded();
+      // The first connection reaches a channel that answers nothing (the tab
+      // was frozen mid-send); the second reaches the FF1.
+      const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      const live = deviceOnRelay(grants);
+      let opened = 0;
+      const socketFactory = (url: string): WebSocket => {
+        opened += 1;
+        return opened === 1 ? silent.socketFactory(url) : live.socketFactory(url);
+      };
+      page.hide();
+      const displayed = displayDp1Playlist({ session, playlist, socketFactory, timeoutMs: 200 });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // Past the deadline and still hidden: nothing is resent until the visitor returns.
+      expect(opened).toBe(1);
+      page.show();
+      await displayed;
+      expect(opened).toBe(2);
+      expect(live.ff1.seen).toHaveLength(1);
+      expect(live.ff1.seen[0]).toMatchObject({ cmd: "displayPlaylist", ctr: 2 });
+      expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("does not resend an unanswered request when the page stayed visible", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      await seeded();
+      const relay = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 200 }));
+      expect((error as DisplayError).code).toBe("display_failed");
+      expect(relay.sockets).toHaveLength(1);
+      expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("resends at most once, and never after a refusal the FF1 signed", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const { grants } = await seeded();
+      const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      page.hide();
+      const twice = captureError(displayDp1Playlist({ session, playlist, socketFactory: silent.socketFactory, timeoutMs: 100 }));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      page.show();
+      expect(((await twice) as DisplayError).code).toBe("display_failed");
+      expect(silent.sockets).toHaveLength(2);
+
+      page.hide();
+      const refusing = deviceOnRelay(grants, () => ({ ok: false, code: "command_failed" }));
+      const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: refusing.socketFactory }));
+      expect((error as DisplayError).code).toBe("display_rejected");
+      expect(refusing.sockets).toHaveLength(1);
+    } finally {
+      page.uninstall();
+    }
   });
 
   it("maps an empty channel (RelayUndeliveredError) to display_failed as offline", async () => {

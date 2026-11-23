@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Three fixes for pairing on a phone, where the visitor leaves the page for the
+Feral File app and the browser suspends the tab (seen 2026-11-23 on Android,
+feral-file/feral-file#3644).
+
+- **The pairing dialog can be tapped over a host page's modal.** A page with a
+  modal open (Radix and similar) sets `pointer-events: none` on `<body>`; the
+  overlay is appended to `<body>` and inherited it, so the app link, the code
+  and Cancel did nothing. The overlay now sets `pointer-events: auto` inline.
+- **The approval is collected when the visitor returns.** The waits between
+  polls end as the page turns visible, and a result poll that fails because
+  the tab was suspended with it in flight is repeated at once. Before, the
+  dialog sat on "Waiting" for up to five seconds after the return, long
+  enough to send the visitor back to the app for a code already used.
+- **A display request cut off by suspension is sent again.** A request that
+  goes unanswered (deadline, dropped connection, empty channel) while the page
+  was hidden at some point on the way is sent once more when the page is
+  visible, sealed fresh under a new counter. A refusal the Art Computer signed
+  is never resent, and a page that stayed visible reports the failure as
+  before. If the first copy did arrive, the Art Computer starts the same
+  playlist again.
+
 ## 0.6.0
 
 One release for every Art Computer in the field.
