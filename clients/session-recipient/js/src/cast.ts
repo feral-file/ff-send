@@ -179,6 +179,47 @@ class UnansweredError extends DisplayError {
   }
 }
 
+/** How long after an unanswered request the visitor's return still sends it again. */
+const resendWindowMs = 10 * 60_000;
+/** Counts display requests begun on this page, so a resend never follows a newer one. */
+let displayRequests = 0;
+
+/**
+ * Runs one display request and, when it goes unanswered in a page that was
+ * hidden on the way, sends it once more after the visitor returns.
+ *
+ * Pairing sends the visitor to the Feral File app, and a phone suspends the
+ * hidden tab within seconds: a request begun there can be frozen between
+ * chunks until its deadline has passed, and then reads as a relay timeout.
+ * The second copy is a fresh request (sealed under a new counter, or a new
+ * POST). If the first did arrive, the Art Computer starts the same playlist
+ * again. So that it never replaces something newer, nothing is resent once
+ * this page has begun another display request, or when the visitor returns
+ * more than ten minutes later; another tab's request cannot be seen from here.
+ */
+async function acrossSuspension<T>(send: () => Promise<T>): Promise<T> {
+  displayRequests += 1;
+  const mine = displayRequests;
+  const hiddenWatch = watchPageHidden();
+  let failure: unknown;
+  try {
+    return await send();
+  } catch (error) {
+    if (!(error instanceof UnansweredError) || !hiddenWatch.wasHidden()) {
+      throw error;
+    }
+    failure = error;
+  } finally {
+    hiddenWatch.stop();
+  }
+  const failedAt = Date.now();
+  await whenPageVisible();
+  if (displayRequests !== mine || Date.now() - failedAt > resendWindowMs) {
+    throw failure;
+  }
+  return send();
+}
+
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -201,30 +242,12 @@ function resOk(res: unknown): boolean | undefined {
 export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {
   const { session } = options;
   if (session.kind === "relayerSession") {
-    return castWithRelayerSession(options, session);
+    return acrossSuspension(() => castWithRelayerSession(options, session));
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
-  const send = (): Promise<unknown> =>
-    runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory);
-  // Pairing sends the visitor to the Feral File app, and a phone suspends the
-  // hidden tab within seconds: a request begun there can be frozen between
-  // chunks until its deadline has passed. An unanswered request whose page
-  // was hidden on the way is sent once more when the visitor is back, sealed
-  // fresh under a new counter. If the first copy did arrive, the Art Computer
-  // starts the same playlist again, which is what the visitor asked for.
-  const hiddenWatch = watchPageHidden();
-  let result: unknown;
-  try {
-    result = await send();
-  } catch (error) {
-    if (!(error instanceof UnansweredError) || !hiddenWatch.wasHidden()) {
-      throw error;
-    }
-    await whenPageVisible();
-    result = await send();
-  } finally {
-    hiddenWatch.stop();
-  }
+  const result = await acrossSuspension(() =>
+    runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory)
+  );
   if (resOk(result) === false) {
     throw new DisplayError("FF1 rejected display request", "display_rejected");
   }
@@ -381,7 +404,7 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
   // body read. Each step races it, so a fetch that ignores the abort signal
   // still cannot hold the cast past it.
   const controller = new AbortController();
-  const timedOut = (): DisplayError => new DisplayError("the relayer did not answer in time", "display_failed");
+  const timedOut = (): DisplayError => new UnansweredError("the relayer did not answer in time");
   const pastDeadline = (): boolean => controller.signal.aborted;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -419,7 +442,7 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
         if (pastDeadline()) {
           throw timedOut();
         }
-        throw new DisplayError("the relayer is unreachable", "display_failed");
+        throw new UnansweredError("the relayer is unreachable");
       }
     }
     if (response.status === 401 || response.status === 403) {

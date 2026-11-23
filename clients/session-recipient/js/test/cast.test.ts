@@ -189,7 +189,11 @@ describe("displayDp1Playlist over relay v2", () => {
       };
       page.hide();
       const displayed = displayDp1Playlist({ session, playlist, socketFactory, timeoutMs: 200 });
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // The first request has failed once its socket is closed.
+      await vi.waitFor(() => {
+        expect(silent.sockets[0]?.closed).toBe(true);
+      }, { timeout: 4_000 });
+      await new Promise((resolve) => setTimeout(resolve, 50));
       // Past the deadline and still hidden: nothing is resent until the visitor returns.
       expect(opened).toBe(1);
       page.show();
@@ -198,6 +202,53 @@ describe("displayDp1Playlist over relay v2", () => {
       expect(live.ff1.seen).toHaveLength(1);
       expect(live.ff1.seen[0]).toMatchObject({ cmd: "displayPlaylist", ctr: 2 });
       expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("does not resend over a newer display request from this page", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const { grants } = await seeded();
+      const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      const live = deviceOnRelay(grants);
+      page.hide();
+      const first = captureError(displayDp1Playlist({ session, playlist, socketFactory: silent.socketFactory, timeoutMs: 100 }));
+      await vi.waitFor(() => {
+        expect(silent.sockets[0]?.closed).toBe(true);
+      }, { timeout: 4_000 });
+      // The visitor's next request, begun while the first waits for the page.
+      const newer = { ...playlist, title: "newer" };
+      await displayDp1Playlist({ session, playlist: newer, socketFactory: live.socketFactory });
+      page.show();
+      expect(((await first) as DisplayError).code).toBe("display_failed");
+      expect(silent.sockets).toHaveLength(1);
+      expect(live.ff1.seen).toHaveLength(1);
+      expect(live.ff1.seen[0]).toMatchObject({ req: { dp1_call: newer } });
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("does not resend when the visitor returns after the resend window", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      await seeded();
+      const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      page.hide();
+      const first = captureError(displayDp1Playlist({ session, playlist, socketFactory: silent.socketFactory, timeoutMs: 100 }));
+      await vi.waitFor(() => {
+        expect(silent.sockets[0]?.closed).toBe(true);
+      }, { timeout: 4_000 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60_000);
+      page.show();
+      const error = await first;
+      clock.mockRestore();
+      expect((error as DisplayError).code).toBe("display_failed");
+      expect(silent.sockets).toHaveLength(1);
     } finally {
       page.uninstall();
     }
@@ -224,7 +275,9 @@ describe("displayDp1Playlist over relay v2", () => {
       const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
       page.hide();
       const twice = captureError(displayDp1Playlist({ session, playlist, socketFactory: silent.socketFactory, timeoutMs: 100 }));
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await vi.waitFor(() => {
+        expect(silent.sockets[0]?.closed).toBe(true);
+      }, { timeout: 4_000 });
       page.show();
       expect(((await twice) as DisplayError).code).toBe("display_failed");
       expect(silent.sockets).toHaveLength(2);
@@ -470,6 +523,29 @@ describe("displayDp1Playlist with a relayer session", () => {
       .mockImplementation(answer);
     await displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends a relayer session's request once more when the visitor is back, after it went unanswered while the page was hidden", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const answer = relayerAnswer(200, { ok: true });
+      let calls = 0;
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        calls += 1;
+        // The first request never answers: the tab was frozen with it in flight.
+        return calls === 1 ? new Promise<Response>(() => undefined) : answer(input, init);
+      });
+      page.hide();
+      const displayed = displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl, timeoutMs: 20 });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(calls).toBe(1);
+      page.show();
+      await displayed;
+      expect(calls).toBe(2);
+      expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
   });
 
   it("refuses to cast with a session that is not the stored one, leaving the stored one alone", async () => {

@@ -895,6 +895,84 @@ describe("requestEphemeralSession", () => {
     }
   });
 
+  it("drops a result poll that hangs across a suspension and asks again when the page is visible", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const broker = await fakeBroker();
+      let hung = false;
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        if (!hung && broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+          // Seen on Android: the poll in flight when the tab froze neither
+          // fails nor answers for many seconds after the page is shown again.
+          hung = true;
+          page.hide();
+          setTimeout(() => {
+            page.show();
+          }, 20);
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          });
+        }
+        return broker.fetchImpl(input, init);
+      });
+      const started = Date.now();
+      const session = await requestGrant({ brokerBaseUrl, fetchImpl, maxWaitMs: 60_000 });
+      expect(session.deviceId).toBe("FF1-FIXTURE1");
+      expect(hung).toBe(true);
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("asks again when a result poll's body read fails as the page wakes", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const broker = await fakeBroker();
+      let failed = false;
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        if (!failed && broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+          failed = true;
+          page.hide();
+          page.show();
+          // Headers arrived before the freeze; the body read fails after it.
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.reject(new TypeError("network error"))
+          } as unknown as Response);
+        }
+        return broker.fetchImpl(input, init);
+      });
+      const session = await requestGrant({ brokerBaseUrl, fetchImpl, maxWaitMs: 60_000 });
+      expect(session.deviceId).toBe("FF1-FIXTURE1");
+      expect(failed).toBe(true);
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("does not repeat a failed result poll in a page that stayed visible", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const broker = await fakeBroker();
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        if (broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new TypeError("network error")) } as unknown as Response);
+        }
+        return broker.fetchImpl(input, init);
+      });
+      const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl)));
+      expect((error as Error).message).toMatch(/poll failed/);
+      expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
+  });
+
   it("times out with approval_timeout when the mint_request POST never resolves", async () => {
     const broker = await fakeBroker();
     const fetchImpl = vi.fn<typeof fetch>((input, init) => {
