@@ -23,6 +23,7 @@ import {
 } from "./grantStore.js";
 import { algorithm, buildAppLink, defaultAppLinkBaseUrl, type PairingMaterial } from "./pairingPayload.js";
 import { readStoredRelayerSession, removeStoredRelayerSession, storeRelayerSession, type StoredRelayerSession } from "./sessionStore.js";
+import { onPageVisible, pageHidden, watchPageHidden } from "./visibility.js";
 
 export { ephemeralBrowserSessionStorageKey } from "./sessionStore.js";
 
@@ -503,6 +504,11 @@ function parseRelayerSession(value: Record<string, unknown>): RelayerSessionResu
   return { kind: "relayerSession", token, sessionId, expiresAt, persistent, relayerBaseUrl: optionalString(session, "relayerBaseUrl") };
 }
 
+/**
+ * Waits between polls. The wait also ends when the page turns visible: a
+ * visitor coming back from the Feral File app should not sit out the rest of
+ * an interval that began before the tab was suspended.
+ */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted === true) {
@@ -512,10 +518,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const finish = (): void => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", finish);
+      stopWatching();
       resolve();
     };
     const timer = setTimeout(finish, ms);
     signal?.addEventListener("abort", finish, { once: true });
+    const stopWatching = onPageVisible(finish);
   });
 }
 
@@ -649,6 +657,60 @@ async function pollMessages(input: {
     throw new ChannelGoneError();
   }
   return parsePoll(await jsonResponse(response, "poll failed"), input.channel.channelId);
+}
+
+/** How long a poll that failed in a hidden page waits before it is repeated; the page turning visible ends the wait. */
+const hiddenPollRetryMs = 5000;
+
+/**
+ * `pollMessages`, for a page a phone suspends while the visitor is in the
+ * Feral File app. A poll in flight across the suspension does one of three
+ * things when the page wakes: it fails, it fails while its body is read, or
+ * it hangs for many seconds before it answers (13 s seen on Android). None of
+ * them says anything about the channel, and the answer is usually waiting by
+ * then, so such a poll is dropped and asked again the moment the page is
+ * visible.
+ *
+ * Only a poll that saw the page hidden is repeated, so a page that stays
+ * visible fails as `pollMessages` does, and repeats cannot run back to back:
+ * each one needs the page to have been hidden again. A channel the broker
+ * reports gone, and the caller's own abort, always pass through.
+ */
+async function pollMessagesAwake(input: {
+  fetcher: typeof fetch;
+  channel: BrowserChannel;
+  afterSeq: number;
+  signal: AbortSignal | undefined;
+}): Promise<PollMessagesResponse> {
+  for (;;) {
+    const controller = new AbortController();
+    const forward = (): void => {
+      controller.abort();
+    };
+    input.signal?.addEventListener("abort", forward, { once: true });
+    if (input.signal?.aborted === true) {
+      controller.abort();
+    }
+    const hiddenWatch = watchPageHidden();
+    // Fires on the page turning visible, which is the visitor coming back.
+    const stopWaking = onPageVisible(forward);
+    try {
+      return await pollMessages({ ...input, signal: controller.signal });
+    } catch (error) {
+      if (input.signal?.aborted === true || error instanceof ChannelGoneError || !hiddenWatch.wasHidden()) {
+        throw error;
+      }
+    } finally {
+      stopWaking();
+      hiddenWatch.stop();
+      input.signal?.removeEventListener("abort", forward);
+    }
+    if (pageHidden()) {
+      // The failure arrived before the page was shown again.
+      // An abort during the wait ends it; the next pass rethrows it.
+      await sleep(hiddenPollRetryMs, input.signal);
+    }
+  }
 }
 
 /** Best-effort close so an abandoned channel stops admitting a device. */
@@ -814,7 +876,7 @@ async function waitForPeer(context: PairingContext, channel: BrowserChannel, loc
     const bound = pastDeadline ? finalPeerCheckTimeoutMs : localDeadline - Date.now();
     const deadlineTimer = setTimeout(onCancel, Math.max(0, bound));
     try {
-      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
+      poll = await pollMessagesAwake({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
     } catch (error) {
       throwIfAborted(context.signal);
       const cutOff = pollController.signal.aborted;
@@ -932,7 +994,7 @@ async function completeMint(input: {
       throwIfAborted(context.signal);
       let poll: PollMessagesResponse;
       try {
-        poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: approvalController.signal });
+        poll = await pollMessagesAwake({ fetcher: context.fetcher, channel, afterSeq, signal: approvalController.signal });
       } catch (error) {
         throwIfAborted(context.signal);
         if (approvalController.signal.aborted) {

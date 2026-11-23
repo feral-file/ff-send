@@ -16,6 +16,8 @@ export type FakeRelayOptions = {
   connectionId?: string;
   /** Close every socket before `hello` with this code. */
   failConnect?: number;
+  /** Hold every socket's `hello` until this settles: a slow connect. */
+  helloAfter?: Promise<void>;
 };
 
 export type SentFrame = { to: string; payload: Record<string, unknown> };
@@ -54,6 +56,15 @@ export class FakeSocket extends EventTarget {
     super();
     this.connectionId = options.connectionId ?? "conn_browser";
     setTimeout(() => {
+      void (options.helloAfter ?? Promise.resolve()).then(() => {
+        this.open();
+      });
+    }, 0);
+  }
+
+  private open(): void {
+    const options = this.options;
+    {
       if (this.closed) {
         return;
       }
@@ -63,7 +74,7 @@ export class FakeSocket extends EventTarget {
       }
       this.readyState = 1;
       this.deliverText({ type: "hello", connectionId: this.connectionId, peers: options.peers.map((peer) => peer.id) });
-    }, 0);
+    }
   }
 
   send(data: string | Uint8Array): void {

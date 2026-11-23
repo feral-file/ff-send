@@ -4,6 +4,7 @@ import { RelayClient, RelayConnectError, RelayUndeliveredError, type SocketFacto
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, reserveCounter, type StoredDisplayGrant } from "./grantStore.js";
 import { readStoredRelayerSession, removeStoredRelayerSession } from "./sessionStore.js";
+import { onPageVisible, pageHidden, watchPageHidden } from "./visibility.js";
 
 export type Dp1Playlist = Record<string, unknown>;
 
@@ -166,6 +167,93 @@ async function sendCommand(
   }
 }
 
+/**
+ * A `display_failed` in which no verified reply came back: the relay refused
+ * the connection, no Art Computer was on the channel, or the request went
+ * unanswered. Unlike a refusal the Art Computer signed, it says nothing about
+ * what the device did, so it is the one failure a suspended page may retry.
+ */
+class UnansweredError extends DisplayError {
+  constructor(message: string) {
+    super(message, "display_failed");
+  }
+}
+
+/** How long after an unanswered request the visitor's return still sends it again. */
+const resendWindowMs = 10 * 60_000;
+/** Counts display requests begun on this page, so a resend never follows a newer one. */
+let displayRequests = 0;
+
+/**
+ * Runs one display request and, when it goes unanswered in a page that was
+ * hidden on the way, sends it once more after the visitor returns.
+ *
+ * Pairing sends the visitor to the Feral File app, and a phone suspends the
+ * hidden tab within seconds: a request begun there can be frozen between
+ * chunks until its deadline has passed, and then reads as a relay timeout.
+ * The second copy is a fresh request (sealed under a new counter, or a new
+ * POST). If the first did arrive, the Art Computer starts the same playlist
+ * again. So that it never replaces something newer, nothing is resent once
+ * this page has begun another display request (checked when the visitor
+ * returns and again just before the copy is transmitted), or more than ten
+ * minutes after the first attempt began; another tab's request cannot be seen
+ * from here.
+ */
+async function acrossSuspension<T>(send: (stillWanted: () => void) => Promise<T>): Promise<T> {
+  displayRequests += 1;
+  const mine = displayRequests;
+  // Fixed before the first attempt: a page frozen for an hour handles its
+  // failure only on waking, and the time it spent frozen has to count.
+  const resendBy = Date.now() + resendWindowMs;
+  const hiddenWatch = watchPageHidden();
+  let failure: unknown;
+  try {
+    return await send(() => undefined);
+  } catch (error) {
+    if (!(error instanceof UnansweredError) || !hiddenWatch.wasHidden()) {
+      throw error;
+    }
+    failure = error;
+  } finally {
+    hiddenWatch.stop();
+  }
+  const stale = (): boolean => displayRequests !== mine || Date.now() > resendBy;
+  await visibleOrBy(resendBy);
+  if (pageHidden() || stale()) {
+    throw failure;
+  }
+  try {
+    // Checked again at the last moment before the copy is transmitted: the
+    // resend connects first, and a newer request can begin meanwhile.
+    return await send(() => {
+      if (stale()) {
+        throw new SupersededError();
+      }
+    });
+  } catch (error) {
+    throw error instanceof SupersededError ? failure : error;
+  }
+}
+
+/** Thrown by a resend's last check; the caller reports the first failure instead. */
+class SupersededError extends Error {}
+
+/** Resolves when the page is visible, or at `deadline`, whichever is first. */
+function visibleOrBy(deadline: number): Promise<void> {
+  if (!pageHidden()) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      stopWatching();
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
+    const stopWatching = onPageVisible(finish);
+  });
+}
+
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -188,10 +276,12 @@ function resOk(res: unknown): boolean | undefined {
 export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {
   const { session } = options;
   if (session.kind === "relayerSession") {
-    return castWithRelayerSession(options, session);
+    return acrossSuspension((stillWanted) => castWithRelayerSession(options, session, stillWanted));
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
-  const result = await runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory);
+  const result = await acrossSuspension((stillWanted) =>
+    runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory, stillWanted)
+  );
   if (resOk(result) === false) {
     throw new DisplayError("FF1 rejected display request", "display_rejected");
   }
@@ -220,7 +310,9 @@ async function runDisplayGrantCommand(
   command: "displayPlaylist" | "getDeviceStatus",
   req: Record<string, unknown>,
   timeoutMs: number,
-  socketFactory: SocketFactory | undefined
+  socketFactory: SocketFactory | undefined,
+  /** Runs once the relay connection is up, just before the request is sealed; a throw sends nothing and takes no counter. */
+  stillWanted: () => void = () => undefined
 ): Promise<unknown> {
   const requestName = command === "displayPlaylist" ? "display request" : "status request";
   const origin = currentOrigin();
@@ -239,6 +331,7 @@ async function runDisplayGrantCommand(
     throw new DisplayError(pairingReplacedMessage, "display_failed");
   }
   const reserve = async (): Promise<number> => {
+    stillWanted();
     const reserved = await reserveCounter(origin, 1, record.ctl);
     if (reserved === undefined) {
       // Gone, or replaced by another tab's pairing: this grant is stale.
@@ -256,12 +349,12 @@ async function runDisplayGrantCommand(
       // The relay refused or dropped the connection before hello. Browsers
       // see no status, and the usual cause is the relay's per-address cap
       // (429 capacity / rate limited) when many tabs cast at once.
-      throw new DisplayError(tooManyCastsMessage, "display_failed");
+      throw new UnansweredError(tooManyCastsMessage);
     }
     if (outcome.error instanceof RelayUndeliveredError) {
-      throw new DisplayError("the FF1 is offline", "display_failed");
+      throw new UnansweredError("the FF1 is offline");
     }
-    throw new DisplayError(`${requestName} failed: ${outcome.error.message}`, "display_failed");
+    throw new UnansweredError(`${requestName} failed: ${outcome.error.message}`);
   }
   const { claims } = outcome;
   if (claims.ok) {
@@ -328,7 +421,12 @@ function relayerOk(value: unknown): boolean | undefined {
  * The 0.4 cast, for a session older firmware minted: one HTTPS POST to the
  * legacy relayer with the session token as bearer.
  */
-async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, session: RelayerSession): Promise<void> {
+async function castWithRelayerSession(
+  options: DisplayDp1PlaylistOptions,
+  session: RelayerSession,
+  /** Runs immediately before every POST, the network retry included; a throw sends nothing. */
+  stillWanted: () => void = () => undefined
+): Promise<void> {
   const origin = currentOrigin();
   const stored = readStoredRelayerSession(origin);
   if (stored === undefined) {
@@ -348,7 +446,7 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
   // body read. Each step races it, so a fetch that ignores the abort signal
   // still cannot hold the cast past it.
   const controller = new AbortController();
-  const timedOut = (): DisplayError => new DisplayError("the relayer did not answer in time", "display_failed");
+  const timedOut = (): DisplayError => new UnansweredError("the relayer did not answer in time");
   const pastDeadline = (): boolean => controller.signal.aborted;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -369,6 +467,7 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
   let body: unknown;
   try {
     try {
+      stillWanted();
       response = await beforeDeadline(fetcher(castUrl, init));
     } catch (error) {
       if (pastDeadline()) {
@@ -381,12 +480,16 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
         throw error;
       }
       try {
+        stillWanted();
         response = await beforeDeadline(fetcher(castUrl, init));
-      } catch {
+      } catch (retryError) {
+        if (retryError instanceof SupersededError) {
+          throw retryError;
+        }
         if (pastDeadline()) {
           throw timedOut();
         }
-        throw new DisplayError("the relayer is unreachable", "display_failed");
+        throw new UnansweredError("the relayer is unreachable");
       }
     }
     if (response.status === 401 || response.status === 403) {

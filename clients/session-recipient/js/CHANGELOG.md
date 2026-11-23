@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+Three fixes for pairing on a phone, where the visitor leaves the page for the
+Feral File app and the browser suspends the tab (seen 2026-11-23 on Android,
+feral-file/feral-file#3644).
+
+- **The pairing dialog can be tapped over a host page's modal.** A page with a
+  modal open (Radix and similar) sets `pointer-events: none` on `<body>`; the
+  overlay is appended to `<body>` and inherited it, so the app link, the code
+  and Cancel did nothing. The overlay now sets `pointer-events: auto` inline
+  (a host stylesheet needs `!important` to override it). Not covered: a host
+  modal that traps keyboard focus or marks the rest of the page `inert` still
+  keeps the keyboard out of the dialog.
+- **The approval is collected when the visitor returns.** A poll in flight
+  when the tab was suspended fails on wake, fails while its body is read, or
+  hangs (13 s seen) before answering. Such a poll is now dropped and asked
+  again the moment the page is visible, and the waits between polls end then
+  too. Before, the dialog sat on "Waiting" after the return, long enough to
+  send the visitor back to the app for a code already used.
+- **A display request cut off by suspension is sent again.** A request that
+  goes unanswered (deadline, dropped connection, empty channel, unreachable
+  relayer) while the page was hidden at some point on the way is sent once
+  more when the page is visible, as a fresh request, for a display grant and
+  for a relayer session alike. A verified reply, refusal or not, settles the
+  request and is never followed by a resend, and a page that stayed visible
+  reports the failure as before. Nothing is resent once the page has begun a
+  newer display request (checked on the return and again just before the copy
+  is transmitted), or more than ten minutes after the first attempt began,
+  time spent frozen included. If the first copy did arrive, the Art Computer starts the same
+  playlist again; a request another tab sent in between would be replaced.
+
 ## 0.6.0
 
 One release for every Art Computer in the field.
