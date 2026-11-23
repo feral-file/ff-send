@@ -63,7 +63,7 @@ receives the playlist over HTTPS and forwards it to the FF1.
   [release](https://github.com/feral-file/play/releases/latest) as `display.js`):
   host it next to your pages and
   `import { mountDisplayOnArtComputerButton } from "./display.js"`, or import it
-  straight from a CDN, `https://cdn.jsdelivr.net/npm/@feralfile/display@0.6.0/dist/display.js`
+  straight from a CDN, `https://cdn.jsdelivr.net/npm/@feralfile/display@0.6.1/dist/display.js`
   (`https://unpkg.com/@feralfile/display` serves the same file; `esm.sh`
   instead bundles the package entry on the fly, which also works). The
   package entry, `dist/index.js`, imports its dependencies (`jose`,
@@ -345,7 +345,7 @@ uses the hosted broker by default, so no local server is needed.
 
 ## Status
 
-This guide documents `@feralfile/display` 0.6.0. 0.5.0 was the library's
+This guide documents `@feralfile/display` 0.6.1. 0.5.0 was the library's
 first release under its new name; through 0.4.0 it was `@feralfile/play`.
 Moving from `@feralfile/play` 0.4 means changing the package name and import
 specifier and taking the 0.5 changes below, less what 0.6 brings back. The `Play` names
