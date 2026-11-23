@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 Three fixes for pairing on a phone, where the visitor leaves the page for the
 Feral File app and the browser suspends the tab (seen 2026-11-23 on Android,
