@@ -254,6 +254,72 @@ describe("displayDp1Playlist over relay v2", () => {
     }
   });
 
+  it("counts the time a page spent frozen against the resend window", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      await seeded();
+      const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      page.hide();
+      const first = captureError(displayDp1Playlist({ session, playlist, socketFactory: silent.socketFactory, timeoutMs: 100 }));
+      // The tab freezes with the request in flight and wakes eleven minutes
+      // later: its overdue deadline fires only now.
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11 * 60_000);
+      await vi.waitFor(() => {
+        expect(silent.sockets[0]?.closed).toBe(true);
+      }, { timeout: 4_000 });
+      // The window has closed: the failure is reported without waiting for
+      // the page to be shown, and nothing is resent when it is.
+      const error = await first;
+      clock.mockRestore();
+      page.show();
+      expect((error as DisplayError).code).toBe("display_failed");
+      expect(silent.sockets).toHaveLength(1);
+      expect(page.listenerCount).toBe(0);
+    } finally {
+      page.uninstall();
+    }
+  });
+
+  it("does not transmit a resend that a newer display request overtook while it connected", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const { grants } = await seeded();
+      const silent = fakeRelay({ peers: [{ id: "conn_ff1" }] });
+      let releaseHello = (): void => undefined;
+      const slowHello = new Promise<void>((resolve) => {
+        releaseHello = resolve;
+      });
+      const slow = deviceOnRelay(grants, undefined, [], { helloAfter: slowHello });
+      const live = deviceOnRelay(grants);
+      let opened = 0;
+      // 1: the request that goes unanswered. 2: its resend, slow to connect.
+      const firstFactory = (url: string): WebSocket => {
+        opened += 1;
+        return opened === 1 ? silent.socketFactory(url) : slow.socketFactory(url);
+      };
+      page.hide();
+      const first = captureError(displayDp1Playlist({ session, playlist, socketFactory: firstFactory, timeoutMs: 300 }));
+      await vi.waitFor(() => {
+        expect(silent.sockets[0]?.closed).toBe(true);
+      }, { timeout: 4_000 });
+      page.show();
+      await vi.waitFor(() => {
+        expect(opened).toBe(2);
+      }, { timeout: 4_000 });
+      // The visitor picks something else while the resend is still connecting.
+      const newer = { ...playlist, title: "newer" };
+      await displayDp1Playlist({ session, playlist: newer, socketFactory: live.socketFactory });
+      releaseHello();
+      expect(((await first) as DisplayError).code).toBe("display_failed");
+      expect(slow.ff1.seen).toHaveLength(0);
+      expect(slow.frames).toHaveLength(0);
+      expect(live.ff1.seen).toHaveLength(1);
+      expect(live.ff1.seen[0]).toMatchObject({ req: { dp1_call: newer } });
+    } finally {
+      page.uninstall();
+    }
+  });
+
   it("does not resend an unanswered request when the page stayed visible", async () => {
     const page = new FakeVisibility().install();
     try {

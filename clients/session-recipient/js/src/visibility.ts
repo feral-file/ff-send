@@ -57,16 +57,6 @@ export function onPageVisible(wake: () => void): () => void {
   };
 }
 
-/** Resolves once the page is visible: at once when it already is. */
-export function whenPageVisible(): Promise<void> {
-  if (!pageHidden()) {
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    onPageVisible(resolve);
-  });
-}
-
 /**
  * Records whether the page was hidden at any moment from this call until
  * `stop`. `wasHidden` stays readable after `stop`.

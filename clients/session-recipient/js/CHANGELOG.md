@@ -26,8 +26,9 @@ feral-file/feral-file#3644).
   for a relayer session alike. A verified reply, refusal or not, settles the
   request and is never followed by a resend, and a page that stayed visible
   reports the failure as before. Nothing is resent once the page has begun a
-  newer display request, or when the visitor returns more than ten minutes
-  later. If the first copy did arrive, the Art Computer starts the same
+  newer display request (checked on the return and again just before the copy
+  is transmitted), or more than ten minutes after the first attempt began,
+  time spent frozen included. If the first copy did arrive, the Art Computer starts the same
   playlist again; a request another tab sent in between would be replaced.
 
 ## 0.6.0

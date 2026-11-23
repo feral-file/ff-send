@@ -4,7 +4,7 @@ import { RelayClient, RelayConnectError, RelayUndeliveredError, type SocketFacto
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, reserveCounter, type StoredDisplayGrant } from "./grantStore.js";
 import { readStoredRelayerSession, removeStoredRelayerSession } from "./sessionStore.js";
-import { watchPageHidden, whenPageVisible } from "./visibility.js";
+import { onPageVisible, pageHidden, watchPageHidden } from "./visibility.js";
 
 export type Dp1Playlist = Record<string, unknown>;
 
@@ -194,16 +194,21 @@ let displayRequests = 0;
  * The second copy is a fresh request (sealed under a new counter, or a new
  * POST). If the first did arrive, the Art Computer starts the same playlist
  * again. So that it never replaces something newer, nothing is resent once
- * this page has begun another display request, or when the visitor returns
- * more than ten minutes later; another tab's request cannot be seen from here.
+ * this page has begun another display request (checked when the visitor
+ * returns and again just before the copy is transmitted), or more than ten
+ * minutes after the first attempt began; another tab's request cannot be seen
+ * from here.
  */
-async function acrossSuspension<T>(send: () => Promise<T>): Promise<T> {
+async function acrossSuspension<T>(send: (stillWanted: () => void) => Promise<T>): Promise<T> {
   displayRequests += 1;
   const mine = displayRequests;
+  // Fixed before the first attempt: a page frozen for an hour handles its
+  // failure only on waking, and the time it spent frozen has to count.
+  const resendBy = Date.now() + resendWindowMs;
   const hiddenWatch = watchPageHidden();
   let failure: unknown;
   try {
-    return await send();
+    return await send(() => undefined);
   } catch (error) {
     if (!(error instanceof UnansweredError) || !hiddenWatch.wasHidden()) {
       throw error;
@@ -212,12 +217,41 @@ async function acrossSuspension<T>(send: () => Promise<T>): Promise<T> {
   } finally {
     hiddenWatch.stop();
   }
-  const failedAt = Date.now();
-  await whenPageVisible();
-  if (displayRequests !== mine || Date.now() - failedAt > resendWindowMs) {
+  const stale = (): boolean => displayRequests !== mine || Date.now() > resendBy;
+  await visibleOrBy(resendBy);
+  if (pageHidden() || stale()) {
     throw failure;
   }
-  return send();
+  try {
+    // Checked again at the last moment before the copy is transmitted: the
+    // resend connects first, and a newer request can begin meanwhile.
+    return await send(() => {
+      if (stale()) {
+        throw new SupersededError();
+      }
+    });
+  } catch (error) {
+    throw error instanceof SupersededError ? failure : error;
+  }
+}
+
+/** Thrown by a resend's last check; the caller reports the first failure instead. */
+class SupersededError extends Error {}
+
+/** Resolves when the page is visible, or at `deadline`, whichever is first. */
+function visibleOrBy(deadline: number): Promise<void> {
+  if (!pageHidden()) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      stopWatching();
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
+    const stopWatching = onPageVisible(finish);
+  });
 }
 
 function toError(error: unknown): Error {
@@ -242,11 +276,14 @@ function resOk(res: unknown): boolean | undefined {
 export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {
   const { session } = options;
   if (session.kind === "relayerSession") {
-    return acrossSuspension(() => castWithRelayerSession(options, session));
+    return acrossSuspension((stillWanted) => {
+      stillWanted();
+      return castWithRelayerSession(options, session);
+    });
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
-  const result = await acrossSuspension(() =>
-    runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory)
+  const result = await acrossSuspension((stillWanted) =>
+    runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory, stillWanted)
   );
   if (resOk(result) === false) {
     throw new DisplayError("FF1 rejected display request", "display_rejected");
@@ -276,7 +313,9 @@ async function runDisplayGrantCommand(
   command: "displayPlaylist" | "getDeviceStatus",
   req: Record<string, unknown>,
   timeoutMs: number,
-  socketFactory: SocketFactory | undefined
+  socketFactory: SocketFactory | undefined,
+  /** Runs once the relay connection is up, just before the request is sealed; a throw sends nothing and takes no counter. */
+  stillWanted: () => void = () => undefined
 ): Promise<unknown> {
   const requestName = command === "displayPlaylist" ? "display request" : "status request";
   const origin = currentOrigin();
@@ -295,6 +334,7 @@ async function runDisplayGrantCommand(
     throw new DisplayError(pairingReplacedMessage, "display_failed");
   }
   const reserve = async (): Promise<number> => {
+    stillWanted();
     const reserved = await reserveCounter(origin, 1, record.ctl);
     if (reserved === undefined) {
       // Gone, or replaced by another tab's pairing: this grant is stale.

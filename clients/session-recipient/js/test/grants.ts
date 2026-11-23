@@ -5,7 +5,7 @@ import { exportPublicJwk, generateAgreementKeyPair, generateSigningKeyPair, thum
 import { replaceStoredDisplayGrant, type StoredDisplayGrant } from "../src/grantStore.js";
 import { FakeFF1, type FakeAnswer, type Jwk } from "./control-device.js";
 import { relayV2Endpoint } from "./fakeBroker.js";
-import { fakeRelay, type FakePeer } from "./fakeRelay.js";
+import { type FakeRelayOptions, fakeRelay, type FakePeer } from "./fakeRelay.js";
 import { fixtureDevice } from "./fixtures.js";
 
 /** Gives the test a fresh, empty IndexedDB. */
@@ -52,11 +52,13 @@ export async function seedGrant(origin: string, overrides: Partial<StoredDisplay
 export function deviceOnRelay(
   grants: Record<string, Jwk>,
   decide?: (claims: Record<string, unknown>) => FakeAnswer,
-  extraPeers: FakePeer[] = []
+  extraPeers: FakePeer[] = [],
+  relayOptions: Pick<FakeRelayOptions, "helloAfter"> = {}
 ) {
   const ff1 = new FakeFF1(fixtureDevice(), grants, decide);
   const relay = fakeRelay({
-    peers: [{ id: "conn_ff1", respond: (message) => ff1.handle(message) }, ...extraPeers]
+    peers: [{ id: "conn_ff1", respond: (message) => ff1.handle(message) }, ...extraPeers],
+    ...relayOptions
   });
   return { ff1, ...relay };
 }

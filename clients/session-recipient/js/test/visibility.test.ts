@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { onPageVisible, pageHidden, watchPageHidden, whenPageVisible } from "../src/visibility.js";
+import { onPageVisible, pageHidden, watchPageHidden } from "../src/visibility.js";
 import { FakeVisibility } from "./fakeVisibility.js";
 
 describe("page visibility without a document", () => {
-  it("counts the page as always visible", async () => {
+  it("counts the page as always visible", () => {
     expect(pageHidden()).toBe(false);
-    await whenPageVisible();
     const watch = watchPageHidden();
     expect(watch.wasHidden()).toBe(false);
     watch.stop();
@@ -46,20 +45,6 @@ describe("page visibility", () => {
     page.show();
     expect(wake).not.toHaveBeenCalled();
     expect(page.listenerCount).toBe(0);
-  });
-
-  it("resolves at once when visible and on return when hidden", async () => {
-    await whenPageVisible();
-    page.hide();
-    let resolved = false;
-    const waiting = whenPageVisible().then(() => {
-      resolved = true;
-    });
-    await Promise.resolve();
-    expect(resolved).toBe(false);
-    page.show();
-    await waiting;
-    expect(resolved).toBe(true);
   });
 
   it("remembers a hidden spell after the page is visible again, and one that began before the watch", () => {
