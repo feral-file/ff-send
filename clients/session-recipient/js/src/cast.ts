@@ -276,10 +276,7 @@ function resOk(res: unknown): boolean | undefined {
 export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {
   const { session } = options;
   if (session.kind === "relayerSession") {
-    return acrossSuspension((stillWanted) => {
-      stillWanted();
-      return castWithRelayerSession(options, session);
-    });
+    return acrossSuspension((stillWanted) => castWithRelayerSession(options, session, stillWanted));
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
   const result = await acrossSuspension((stillWanted) =>
@@ -424,7 +421,12 @@ function relayerOk(value: unknown): boolean | undefined {
  * The 0.4 cast, for a session older firmware minted: one HTTPS POST to the
  * legacy relayer with the session token as bearer.
  */
-async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, session: RelayerSession): Promise<void> {
+async function castWithRelayerSession(
+  options: DisplayDp1PlaylistOptions,
+  session: RelayerSession,
+  /** Runs immediately before every POST, the network retry included; a throw sends nothing. */
+  stillWanted: () => void = () => undefined
+): Promise<void> {
   const origin = currentOrigin();
   const stored = readStoredRelayerSession(origin);
   if (stored === undefined) {
@@ -465,6 +467,7 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
   let body: unknown;
   try {
     try {
+      stillWanted();
       response = await beforeDeadline(fetcher(castUrl, init));
     } catch (error) {
       if (pastDeadline()) {
@@ -477,8 +480,12 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
         throw error;
       }
       try {
+        stillWanted();
         response = await beforeDeadline(fetcher(castUrl, init));
-      } catch {
+      } catch (retryError) {
+        if (retryError instanceof SupersededError) {
+          throw retryError;
+        }
         if (pastDeadline()) {
           throw timedOut();
         }

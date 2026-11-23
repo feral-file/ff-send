@@ -614,6 +614,48 @@ describe("displayDp1Playlist with a relayer session", () => {
     }
   });
 
+  it("does not retry a relayer session's resend over the network once a newer display request has begun", async () => {
+    const page = new FakeVisibility().install();
+    try {
+      const answer = relayerAnswer(200, { ok: true });
+      const posted: string[] = [];
+      let failHeld = (): void => undefined;
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        const sent = typeof init?.body === "string" ? init.body : "{}";
+        const title = (JSON.parse(sent) as { request: { dp1_call: { title: string } } }).request.dp1_call.title;
+        posted.push(title);
+        if (posted.length === 1) {
+          // The first request never answers: the tab froze with it in flight.
+          return new Promise<Response>(() => undefined);
+        }
+        if (posted.length === 2) {
+          // The resend is held in flight, then fails as a network error.
+          return new Promise<Response>((_resolve, reject) => {
+            failHeld = () => {
+              reject(new TypeError("Failed to fetch"));
+            };
+          });
+        }
+        return answer(input, init);
+      });
+      page.hide();
+      const first = captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl, timeoutMs: 40 }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      page.show();
+      await vi.waitFor(() => {
+        expect(posted).toHaveLength(2);
+      }, { timeout: 4_000 });
+      const newer = { ...playlist, title: "newer" };
+      await displayDp1Playlist({ session: relayerSession, playlist: newer, relayerBaseUrl: "https://relayer.example", fetchImpl });
+      failHeld();
+      expect(((await first) as DisplayError).code).toBe("display_failed");
+      // The old playlist is not posted again after the newer one.
+      expect(posted).toEqual([playlist.title, playlist.title, "newer"]);
+    } finally {
+      page.uninstall();
+    }
+  });
+
   it("refuses to cast with a session that is not the stored one, leaving the stored one alone", async () => {
     const fetchImpl = relayerAnswer(200, { ok: true });
     const error = await captureError(displayDp1Playlist({ session: { ...relayerSession, sessionId: "sess_stale" }, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl }));
