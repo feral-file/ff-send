@@ -24,7 +24,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/feral-file/play.git",
+    "url": "git+https://github.com/feral-file/ff-send.git",
     "directory": "clients/session-recipient/js"
   },
   "homepage": "https://docs.feralfile.com/art-computer/display/",
