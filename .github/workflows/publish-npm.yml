@@ -10,10 +10,9 @@ name: publish-npm
 # direct `npm publish` allowed (configurations made after 2026-09-03 allow
 # only `npm stage publish` unless that box is ticked).
 #
-# The entry names the repository and its fields cannot be edited: after a
-# repository rename, delete it on npmjs.com and create it again with the new
-# name before the next release (the entry made on 2026-11-23 names
-# feral-file/play, the name at the time).
+# The entry names the repository: after a repository rename, delete it on
+# npmjs.com and create it again with the new name. A new entry expires unless
+# it publishes once within two days, so make it right before a release.
 #
 # Bootstrap: npm configures a trusted publisher only for a package that
 # exists, and expires a configuration that has not published within 2 days.
