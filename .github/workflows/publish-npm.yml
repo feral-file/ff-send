@@ -6,9 +6,13 @@ name: publish-npm
 #
 # Auth is npm OIDC trusted publishing (same pattern as @feralfile/cli): the
 # trusted publisher for @feralfile/display on npmjs.com points at
-# feral-file/play, workflow file publish-npm.yml, environment blank, with
+# feral-file/ff-send, workflow file publish-npm.yml, environment blank, with
 # direct `npm publish` allowed (configurations made after 2026-09-03 allow
 # only `npm stage publish` unless that box is ticked).
+#
+# The entry names the repository: after a repository rename, delete it on
+# npmjs.com and create it again with the new name. A new entry expires unless
+# it publishes once within two days, so make it right before a release.
 #
 # Bootstrap: npm configures a trusted publisher only for a package that
 # exists, and expires a configuration that has not published within 2 days.
@@ -104,7 +108,7 @@ jobs:
           fi
 
           if ! npm publish --access public --provenance; then
-            echo "::error::npm publish failed. If ${PACKAGE_NAME} has no trusted publisher yet, or it expired (2 days without a publish), configure it on npmjs.com (feral-file/play, publish-npm.yml, environment blank, npm publish allowed) and re-run this job."
+            echo "::error::npm publish failed. If ${PACKAGE_NAME} has no trusted publisher yet, or it expired (2 days without a publish), configure it on npmjs.com (feral-file/ff-send, publish-npm.yml, environment blank, npm publish allowed) and re-run this job."
             exit 1
           fi
 

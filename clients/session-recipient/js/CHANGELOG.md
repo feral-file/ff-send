@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+No code changes. The repository moved from `feral-file/play` to
+`feral-file/ff-send`, and the package's `repository` address follows, so the
+link on npm and the release's provenance name the repository as it is. The
+package name stays `@feralfile/display`.
+
 ## 0.6.1
 
 Three fixes for pairing on a phone, where the visitor leaves the page for the

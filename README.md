@@ -51,9 +51,12 @@ transport until that API is retired.
 - `.github/workflows/publish-npm.yml`: publishes `@feralfile/display` on GitHub release.
 - `Dockerfile`: production image for the Mint Pairing Broker.
 
-The repository keeps the name `feral-file/play`: it also builds the Mint
-Pairing Broker image that Feral File deploys, and renaming it would move that
-image's build path.
+The repository is `feral-file/ff-send`, named for the sender's side: a site or
+an app sends, the Art Computer displays. It was `feral-file/play` until
+2026-11-23, and GitHub redirects the old address. The npm package keeps its
+name, `@feralfile/display`. The Mint Pairing Broker image is published to the
+container registry under its own tag (`apps:mint-pairing-broker-<sha>`), which
+does not depend on the repository's name.
 
 Go module paths still use the pre-rename repository path
 (`github.com/feral-file/ff-art-computer-handoff/...`); GitHub redirects keep
