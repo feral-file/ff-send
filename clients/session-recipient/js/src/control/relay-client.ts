@@ -135,10 +135,14 @@ export class RelayConnectError extends RelayUndeliveredError {
   }
 }
 
-/** relayURL selects the public device channel without credentials. */
-export function relayURL(baseUrl: string, deviceId: string): string {
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(deviceId)) {
-    throw new Error("Invalid device ID");
+/**
+ * relayURL selects one relay channel of a device, without credentials: the
+ * keyed channel (the thumbprint of the device's signing key) or the device-ID
+ * channel.
+ */
+export function relayURL(baseUrl: string, channel: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(channel)) {
+    throw new Error("Invalid relay channel");
   }
   const url = new URL(baseUrl);
   if (
@@ -152,7 +156,7 @@ export function relayURL(baseUrl: string, deviceId: string): string {
     throw new Error("Invalid relayer endpoint");
   }
   url.protocol = ["https:", "wss:"].includes(url.protocol) ? "wss:" : "ws:";
-  url.pathname = `/v2/channels/${deviceId}/connections`;
+  url.pathname = `/v2/channels/${channel}/connections`;
   return url.toString();
 }
 
@@ -222,7 +226,7 @@ export class RelayClient {
   /** Create a channel connection; requests wait for the relay's hello. */
   constructor(
     baseUrl: string,
-    deviceId: string,
+    channel: string,
     private readonly socketFactory: SocketFactory = (url) => new WebSocket(url, "ff-relay.v2")
   ) {
     this.ready = new Promise((resolve, reject) => {
@@ -231,7 +235,7 @@ export class RelayClient {
     // Connection errors may precede the first request; retain rejection without
     // producing an unhandled promise while the caller prepares its command.
     void this.ready.catch(() => undefined);
-    this.url = relayURL(baseUrl, deviceId);
+    this.url = relayURL(baseUrl, channel);
     this.connect(0);
   }
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **A display grant's request goes to the keyed relay channel first.** Each
+  request (`displayDp1Playlist`, `getDeviceStatus`, the self-revoke in
+  `unpairArtComputer`) now connects to
+  `/v2/channels/<thumb(profile.sig)>/connections`, the channel named by the
+  thumbprint of the Art Computer's signing key that the grant pins, instead
+  of `/v2/channels/<deviceId>/connections`. The device ID is short and
+  guessable; the keyed channel takes the pinned profile to find. Only when
+  that attempt provably reached no one (no peer on the channel, the relay
+  refused the request for every peer, or the relay refused the connection) is
+  the request sent once more, as a fresh envelope under the next counter, on
+  the device-ID channel, where FF OS from before the keyed channel listens. A
+  request that may have been delivered, timed out or was answered is never
+  sent on the other channel. Both attempts share the one `timeoutMs`. No API,
+  grant or storage change, and the relay host is the same, so a
+  `Content-Security-Policy` needs no edit. Against older FF OS a request
+  opens two relay connections and uses two counters. Not covered: when the
+  keyed channel lists a connection that is not the Art Computer while the Art
+  Computer is only on the device-ID channel, the request ends at its deadline
+  instead of falling back.
+
 ## 0.6.2
 
 No code changes. The repository moved from `feral-file/play` to

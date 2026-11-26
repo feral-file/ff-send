@@ -305,7 +305,9 @@ The visitor's browser talks to three hosts. If your site sets a
 - the Mint Pairing Broker (`https://handoff.feralfile.com`) — channel
   creation, encrypted message send/poll, channel close
 - the relay v2 host (`wss://relayer.feralfile.io`) — a grant's cast, as a
-  WebSocket (`wss://<relay host>/v2/channels/<deviceId>/connections`), so
+  WebSocket (`wss://<relay host>/v2/channels/<channel>/connections`; the
+  channel is the thumbprint of the Art Computer's signing key, or its device
+  ID for FF OS that predates that channel; same host either way), so
   allow it with the `wss:` scheme. The FF1 names the host in the grant it
   issues (`relayV2Endpoint`), and the library uses only that; you write the
   policy before any grant exists, so allow the host Feral File announces in

@@ -116,7 +116,8 @@ sequenceDiagram
         NFTSite->>Storage: Store grant + keys + counter under current website origin
     end
     NFTSite->>NFTSite: Seal displayPlaylist (DP1 document) under the grant keys
-    NFTSite->>Relayer: wss /v2/channels/{deviceId}/connections: fan out the sealed envelope, ACK frames
+    NFTSite->>Relayer: wss /v2/channels/{thumb(profile.sig)}/connections: fan out the sealed envelope, ACK frames
+    Note over NFTSite,Relayer: If that channel proved empty or refused the connection, once more, freshly sealed, on /v2/channels/{deviceId}/connections
     Relayer->>Feral: Forward the envelope to the FF1 peer
     Feral->>Feral: Open, admit the display grant, resolve DP1 and display through Chromium/frontend
     Feral-->>Relayer: Sealed reply (ok / code)
