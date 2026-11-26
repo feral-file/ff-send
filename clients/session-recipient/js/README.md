@@ -212,7 +212,7 @@ time, in a fixed order:
    connection), once more on the device-ID channel,
    `/v2/channels/<deviceId>/connections`, where FF OS from before the keyed
    channel listens. The second attempt is a fresh envelope under the next
-   counter and runs within what is left of the same `timeoutMs`.
+   counter (a self-revoke keeps its one counter) and runs within what is left of the same `timeoutMs`.
 
 There is no fallback after anything else. A request that may have reached a
 peer, timed out, or got an answer is never sent on the other channel, since

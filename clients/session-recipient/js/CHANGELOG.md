@@ -11,7 +11,7 @@
   guessable; the keyed channel takes the pinned profile to find. Only when
   that attempt provably reached no one (no peer on the channel, the relay
   refused the request for every peer, or the relay refused the connection) is
-  the request sent once more, as a fresh envelope under the next counter, on
+  the request sent once more, as a fresh envelope under the next counter (a self-revoke keeps its one counter), on
   the device-ID channel, where FF OS from before the keyed channel listens. A
   request that may have been delivered, timed out or was answered is never
   sent on the other channel. Both attempts share the one `timeoutMs`. No API,
