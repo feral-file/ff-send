@@ -1,5 +1,6 @@
 import type { DisplayGrantSession, EphemeralBrowserSession, RelayerSession } from "./client.js";
 import { findEnvelopeAnswer, openReply, sealRequest, type ReplyClaims } from "./control/codec.js";
+import { thumbprint } from "./control/jwk.js";
 import { RelayClient, RelayConnectError, RelayUndeliveredError, type SocketFactory } from "./control/relay-client.js";
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, reserveCounter, type StoredDisplayGrant } from "./grantStore.js";
@@ -93,10 +94,23 @@ type CommandOutcome =
     };
 
 /**
- * Seals one `cmd` request under the grant's keys and carries it over relay
- * v2: fan out, ACK every frame, chunk over 32 KiB, and pin the first reply
- * that verifies against the pinned profile. The socket is opened for this
- * command and closed right after; a browser never holds an idle relay slot.
+ * Sends one `cmd` request to the FF1 a grant is pinned to, on the keyed relay
+ * channel `thumb(profile.sig)` and, only when that attempt provably reached
+ * no one, once more on the device-ID channel.
+ *
+ * An FF1 on current FF OS listens on both channels; one on older FF OS only
+ * on the device-ID channel, where anyone who knows the device ID can also
+ * connect. Keyed first keeps a request off that channel whenever the FF1 can
+ * be reached without it.
+ *
+ * The fallback must stay behind `RelayUndeliveredError` (no peer on the
+ * channel, every peer refused by the relay, or the connection never reached
+ * `hello`): after anything else the FF1 may hold the request, and a second
+ * copy could run it twice (§14.4). The second attempt seals a fresh envelope
+ * through `reserve` and gets what is left of `timeoutMs`, so one request still
+ * has one deadline. Accepted: a keyed channel that lists a peer other than
+ * the FF1, while the FF1 is only on the device-ID channel, ends in a timeout
+ * with no fallback.
  */
 async function sendCommand(
   record: StoredDisplayGrant,
@@ -106,9 +120,34 @@ async function sendCommand(
   timeoutMs: number,
   socketFactory: SocketFactory | undefined
 ): Promise<CommandOutcome> {
+  const deadline = Date.now() + timeoutMs;
+  const keyed = await sendOnChannel(await thumbprint(record.profile.sig), record, cmd, req, reserve, timeoutMs, socketFactory);
+  const remainingMs = deadline - Date.now();
+  if (keyed.kind === "reply" || !(keyed.error instanceof RelayUndeliveredError) || remainingMs <= 0) {
+    return keyed;
+  }
+  return sendOnChannel(record.deviceId, record, cmd, req, reserve, remainingMs, socketFactory);
+}
+
+/**
+ * Seals one `cmd` request under the grant's keys and carries it over one
+ * relay v2 channel: fan out, ACK every frame, chunk over 32 KiB, and pin the
+ * first reply that verifies against the pinned profile. The socket is opened
+ * for this attempt and closed right after; a browser never holds an idle
+ * relay slot.
+ */
+async function sendOnChannel(
+  channel: string,
+  record: StoredDisplayGrant,
+  cmd: string,
+  req: Record<string, unknown>,
+  reserve: () => Promise<number>,
+  timeoutMs: number,
+  socketFactory: SocketFactory | undefined
+): Promise<CommandOutcome> {
   let client: RelayClient;
   try {
-    client = new RelayClient(record.relayV2Endpoint, record.deviceId, socketFactory);
+    client = new RelayClient(record.relayV2Endpoint, channel, socketFactory);
   } catch (error) {
     return { kind: "failed", error: toError(error), unrecognized: false };
   }

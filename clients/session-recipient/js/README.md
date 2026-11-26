@@ -16,7 +16,7 @@ fails with "Failed to resolve module specifier \"jose\"".
 
 The published package ships compiled ESM + type declarations from `dist/` (`npm run build`). Source stays TypeScript-first in `src/`.
 
-Browser runtimes check IndexedDB (database `ff-play`, a name kept so stored grants survive the rename; store `displayGrants`, keyed by the current website origin) for an existing display grant. If one is missing or expired, `requestEphemeralSession` generates fresh non-extractable P-256 keys, creates a Mint Pairing Broker channel as the browser (`creatorRole: "browser"`, with the origin from `window.location.origin`, which the broker checks against the `Origin` header the browser sets), hands the visitor the app link `https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>` and a six-digit code through `onPairingMaterial`, and polls until the visitor's Art Computer joins the channel. It then sends an end-to-end encrypted `mint_request` carrying the public keys to the joined device's key, polls for the encrypted result, validates the channel binding, stores the grant with its keys and request counter as one IndexedDB record, and returns the pairing metadata. `displayDp1Playlist` seals a `displayPlaylist` command under those keys and sends it over relay v2 (`wss://<relayV2Endpoint>/v2/channels/<deviceId>/connections`), opening a socket per cast and closing it right after, without exposing the envelope to website code. See [Sequential Flow](../../../docs/sequential-flow.md) for the end-to-end model.
+Browser runtimes check IndexedDB (database `ff-play`, a name kept so stored grants survive the rename; store `displayGrants`, keyed by the current website origin) for an existing display grant. If one is missing or expired, `requestEphemeralSession` generates fresh non-extractable P-256 keys, creates a Mint Pairing Broker channel as the browser (`creatorRole: "browser"`, with the origin from `window.location.origin`, which the broker checks against the `Origin` header the browser sets), hands the visitor the app link `https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>` and a six-digit code through `onPairingMaterial`, and polls until the visitor's Art Computer joins the channel. It then sends an end-to-end encrypted `mint_request` carrying the public keys to the joined device's key, polls for the encrypted result, validates the channel binding, stores the grant with its keys and request counter as one IndexedDB record, and returns the pairing metadata. `displayDp1Playlist` seals a `displayPlaylist` command under those keys and sends it over relay v2, opening a socket per cast and closing it right after, without exposing the envelope to website code. The socket goes to the Art Computer's keyed channel, `wss://<relayV2Endpoint>/v2/channels/<thumb(profile.sig)>/connections`, named by the RFC 7638 thumbprint of the signing key the grant pins; see [Relay channels](#relay-channels) for the one fallback to `/v2/channels/<deviceId>/connections`. See [Sequential Flow](../../../docs/sequential-flow.md) for the end-to-end model.
 
 ```ts
 import {
@@ -197,6 +197,33 @@ After pairing, call `getDeviceStatus({ session })` to read `screenRotation`
 from a verified relay v2 reply. It returns `landscape`, `portrait`,
 `landscapeReverse`, or `portraitReverse`. A legacy relayer session or FF OS
 that refuses the query raises `device_unsupported`.
+
+## Relay channels
+
+A display grant's request (`displayDp1Playlist`, `getDeviceStatus`, the
+self-revoke in `unpairArtComputer`) connects to one relay v2 channel at a
+time, in a fixed order:
+
+1. The keyed channel, `/v2/channels/<thumb(profile.sig)>/connections`: the
+   43-character thumbprint of the Art Computer's signing key, which the grant
+   already pins. Current FF OS listens there.
+2. Only when that attempt provably reached no one (the channel had no peer,
+   the relay refused the request for every peer, or the relay refused the
+   connection), once more on the device-ID channel,
+   `/v2/channels/<deviceId>/connections`, where FF OS from before the keyed
+   channel listens. The second attempt is a fresh envelope under the next
+   counter (a self-revoke keeps its one counter) and runs within what is left of the same `timeoutMs`.
+
+There is no fallback after anything else. A request that may have reached a
+peer, timed out, or got an answer is never sent on the other channel, since
+the Art Computer could then run it twice. One case this leaves: if the keyed
+channel lists a connection that is not the Art Computer while the Art Computer
+is only on the device-ID channel, the request ends at its deadline.
+
+Nothing in the grant or the stored record selects the channel, both are on
+the grant's one `relayV2Endpoint` host (no `Content-Security-Policy` change),
+and the public API is unchanged. Against FF OS from before the keyed channel,
+each request opens two relay connections and uses two counters.
 
 ## Boundaries
 

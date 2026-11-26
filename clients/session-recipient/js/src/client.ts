@@ -466,6 +466,8 @@ async function parseMintResult(value: unknown, channelId: string, requestMessage
     if (!["wss:", "https:"].includes(new URL(relayV2Endpoint).protocol)) {
       throw new Error("mint result invalid");
     }
+    // The endpoint, and the device-ID channel a cast falls back to. The
+    // keyed channel a cast tries first is a thumbprint, always channel-shaped.
     relayURL(relayV2Endpoint, profile.dev);
   } catch {
     throw new Error("mint result invalid");

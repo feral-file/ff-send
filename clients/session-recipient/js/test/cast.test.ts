@@ -2,12 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { displayDp1Playlist, getDeviceStatus, unpairArtComputer } from "../src/cast.js";
 import { ephemeralBrowserSessionStorageKey, type DisplayGrantSession, type RelayerSession } from "../src/client.js";
 import { installLocalStorage, uninstallLocalStorage } from "./localStorage.js";
+import { thumbprint } from "../src/control/jwk.js";
+import type { SocketFactory } from "../src/control/relay-client.js";
 import type { DisplayError } from "../src/errors.js";
 import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
-import type { Jwk } from "./control-device.js";
+import { FakeFF1, type FakeAnswer, type Jwk } from "./control-device.js";
 import { captureError, requestUrl } from "./fakeBroker.js";
-import { fakeRelay, type FakeSocket } from "./fakeRelay.js";
+import { fakeRelay, type FakePeer, type FakeSocket } from "./fakeRelay.js";
 import { FakeVisibility } from "./fakeVisibility.js";
+import { fixtureDevice } from "./fixtures.js";
 import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
 
 const testOrigin = "https://nft.example";
@@ -25,10 +28,30 @@ afterEach(() => {
 /** The session the page holds; `seeded` points it at the grant it writes. */
 const session: DisplayGrantSession = { kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: "", persistent: true };
 
-async function seeded(): Promise<{ ctl: string; sig: Jwk; grants: Record<string, Jwk> }> {
+async function seeded(): Promise<{ ctl: string; sig: Jwk; grants: Record<string, Jwk>; keyed: string }> {
   const { record, sig } = await seedGrant(testOrigin);
   session.ctl = record.ctl;
-  return { ctl: record.ctl, sig, grants: { [record.ctl]: sig } };
+  return { ctl: record.ctl, sig, grants: { [record.ctl]: sig }, keyed: await thumbprint(record.profile.sig) };
+}
+
+/**
+ * Two stub channels on one relay: each connection goes to the stub its URL
+ * names, and `dialed` lists the channels in the order they were connected to.
+ */
+function relayChannels(byChannel: Record<string, SocketFactory>): { socketFactory: SocketFactory; dialed: string[] } {
+  const dialed: string[] = [];
+  const socketFactory: SocketFactory = (url) => {
+    const channel = /^\/v2\/channels\/([^/]+)\/connections$/.exec(new URL(url).pathname)?.[1] ?? "";
+    const open = byChannel[channel];
+    if (open === undefined) {
+      throw new Error(`unexpected relay channel in ${url}`);
+    }
+    if (dialed.at(-1) !== channel) {
+      dialed.push(channel);
+    }
+    return open(url);
+  };
+  return { socketFactory, dialed };
 }
 
 describe("getDeviceStatus over relay v2", () => {
@@ -71,7 +94,7 @@ describe("getDeviceStatus over relay v2", () => {
 
 describe("displayDp1Playlist over relay v2", () => {
   it("seals displayPlaylist in the Play shape under the stored keys, fans it out, and closes the socket", async () => {
-    const { ctl, grants } = await seeded();
+    const { ctl, grants, keyed } = await seeded();
     const relay = deviceOnRelay(grants);
     await displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory });
 
@@ -89,7 +112,7 @@ describe("displayDp1Playlist over relay v2", () => {
     expect((claims?.["exp"] as number) - (claims?.["iat"] as number)).toBe(60);
     expect(relay.frames.map((frame) => frame.to)).toEqual(["peers"]);
     expect(relay.sockets).toHaveLength(1);
-    expect(relay.sockets[0]?.url).toBe("wss://relay.example/v2/channels/FF1-FIXTURE1/connections");
+    expect(relay.sockets[0]?.url).toBe(`wss://relay.example/v2/channels/${keyed}/connections`);
     expect(relay.sockets[0]?.closed).toBe(true);
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(1);
   });
@@ -374,8 +397,9 @@ describe("displayDp1Playlist over relay v2", () => {
     expect((error as DisplayError).code).toBe("display_failed");
     expect((error as DisplayError).message).toMatch(/Too many casts/);
     expect((error as DisplayError).message).not.toMatch(/offline/);
-    // Every connect attempt was refused; nothing was sent and the grant is kept.
-    expect(relay.sockets).toHaveLength(3);
+    // Every connect attempt was refused, on the keyed channel and then on
+    // the device-ID one; nothing was sent and the grant is kept.
+    expect(relay.sockets).toHaveLength(6);
     expect(relay.frames).toHaveLength(0);
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
@@ -443,6 +467,127 @@ describe("displayDp1Playlist over relay v2", () => {
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
     expect((error as DisplayError).code).toBe("session_rejected");
     expect(relay.sockets).toHaveLength(0);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+  });
+});
+
+describe("the relay channel a display grant's request goes to", () => {
+  const deviceChannel = "FF1-FIXTURE1";
+
+  it("connects to the channel named by the thumbprint of the pinned signing key, and to no other when the FF1 is there", async () => {
+    const { grants, keyed } = await seeded();
+    const onKeyed = deviceOnRelay(grants);
+    const onDeviceId = fakeRelay({ peers: [] });
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    await displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory });
+
+    expect(keyed).toHaveLength(43);
+    expect(onKeyed.sockets.map((socket) => socket.url)).toEqual([`wss://relay.example/v2/channels/${keyed}/connections`]);
+    expect(onKeyed.ff1.seen).toHaveLength(1);
+    expect(onDeviceId.sockets).toHaveLength(0);
+  });
+
+  it("sends a fresh envelope on the device-ID channel when the keyed channel has no peer", async () => {
+    const { grants, keyed } = await seeded();
+    const onKeyed = fakeRelay({ peers: [] });
+    // An FF1 on firmware that dials only the device-ID channel.
+    const onDeviceId = deviceOnRelay(grants);
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    await displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory });
+
+    expect(relay.dialed).toEqual([keyed, deviceChannel]);
+    expect(onDeviceId.sockets.map((socket) => socket.url)).toEqual([`wss://relay.example/v2/channels/${deviceChannel}/connections`]);
+    // The first envelope took counter 1 and reached no one; the FF1 sees
+    // only the second, sealed anew under the next counter.
+    expect(onKeyed.frames).toHaveLength(1);
+    expect(onDeviceId.ff1.seen).toHaveLength(1);
+    expect(onDeviceId.ff1.seen[0]).toMatchObject({ cmd: "displayPlaylist", ctr: 2 });
+    expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(2);
+    expect([...onKeyed.sockets, ...onDeviceId.sockets].every((socket) => socket.closed)).toBe(true);
+  });
+
+  it("falls back to the device-ID channel when the relay refuses the keyed connection", async () => {
+    const { grants, keyed } = await seeded();
+    const onKeyed = fakeRelay({ peers: [], failConnect: 1006 });
+    const onDeviceId = deviceOnRelay(grants);
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    await displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory });
+
+    expect(relay.dialed).toEqual([keyed, deviceChannel]);
+    expect(onKeyed.frames).toHaveLength(0);
+    // Nothing was sealed for the refused connection, so no counter was spent on it.
+    expect(onDeviceId.ff1.seen[0]).toMatchObject({ cmd: "displayPlaylist", ctr: 1 });
+  });
+
+  it("reports the device-ID channel's failure when both channels are empty", async () => {
+    const { keyed } = await seeded();
+    const onKeyed = fakeRelay({ peers: [] });
+    const onDeviceId = fakeRelay({ peers: [] });
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
+
+    expect((error as DisplayError).message).toMatch(/offline/);
+    expect(relay.dialed).toEqual([keyed, deviceChannel]);
+    // Once each: the fallback is a single second attempt, never a loop.
+    expect(onKeyed.sockets).toHaveLength(1);
+    expect(onDeviceId.sockets).toHaveLength(1);
+  });
+
+  // The request may have reached a peer on the keyed channel, or the FF1
+  // answered it: a second copy on another channel could run it twice.
+  const noFallback: { name: string; keyedPeers: (ff1: FakePeer) => FakePeer[]; decide?: () => FakeAnswer; code: string }[] = [
+    { name: "a peer took the request and never answered (deadline)", keyedPeers: () => [{ id: "conn_stranger" }], code: "display_failed" },
+    { name: "a peer was sent the request and its ACK never came", keyedPeers: () => [{ id: "conn_stranger", acks: false }], code: "display_failed" },
+    { name: "the FF1 signed a refusal", keyedPeers: (ff1) => [ff1], decide: () => ({ ok: false, code: "command_failed" }), code: "display_rejected" }
+  ];
+  it.each(noFallback)("does not fall back when $name", async ({ keyedPeers, decide, code }) => {
+    const { grants, keyed } = await seeded();
+    const ff1 = new FakeFF1(fixtureDevice(), grants, decide);
+    const onKeyed = fakeRelay({ peers: keyedPeers({ id: "conn_ff1", respond: (message) => ff1.handle(message) }) });
+    const onDeviceId = deviceOnRelay(grants);
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 300 }));
+
+    expect((error as DisplayError).code).toBe(code);
+    expect(relay.dialed).toEqual([keyed]);
+    expect(onDeviceId.ff1.seen).toHaveLength(0);
+  });
+
+  it("does not fall back once the deadline passed while the keyed channel was still connecting", async () => {
+    const { grants, keyed } = await seeded();
+    const onKeyed = fakeRelay({ peers: [], helloAfter: new Promise(() => undefined) });
+    const onDeviceId = deviceOnRelay(grants);
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 100 }));
+
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(relay.dialed).toEqual([keyed]);
+  });
+
+  it("gives the fallback only what is left of the request's deadline", async () => {
+    const { keyed } = await seeded();
+    const onKeyed = fakeRelay({ peers: [], failConnect: 1006 });
+    // A peer that takes the request and never answers.
+    const onDeviceId = fakeRelay({ peers: [{ id: "conn_stranger" }] });
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    const started = Date.now();
+    const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 1500 }));
+
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(relay.dialed).toEqual([keyed, deviceChannel]);
+    // The refused connects took a few hundred ms of the 1.5 s; a fallback
+    // with a deadline of its own would end near 2 s.
+    expect(Date.now() - started).toBeLessThan(1800);
+  });
+
+  it("revokes over the device-ID channel when the keyed channel is empty", async () => {
+    const { ctl, grants, keyed } = await seeded();
+    const onKeyed = fakeRelay({ peers: [] });
+    const onDeviceId = deviceOnRelay(grants);
+    const relay = relayChannels({ [keyed]: onKeyed.socketFactory, [deviceChannel]: onDeviceId.socketFactory });
+    await unpairArtComputer({ socketFactory: relay.socketFactory });
+
+    expect(onDeviceId.ff1.seen[0]).toMatchObject({ ctl, cmd: "revokeController", req: { ctl } });
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 });
